@@ -43,4 +43,7 @@ object ServiceLocator {
 
     @Volatile
     var syncService: OmnilinkSyncService? = null
+
+    @Volatile
+    var notificationService: org.omnilink.notifications.OmnilinkNotificationService? = null
 }

@@ -7,15 +7,20 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.omnilink.model.ConnectionState
 import org.omnilink.pairing.IdentityKeyStore
 import org.omnilink.protocol.ControlPacket
+import org.omnilink.protocol.NotificationPacket
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -30,6 +35,24 @@ class OmnilinkConnectionManager(
 
     private val _latencyMs = MutableStateFlow<Long?>(null)
     val latencyMs: StateFlow<Long?> = _latencyMs.asStateFlow()
+
+    private val _notificationEvents = MutableSharedFlow<NotificationPacket>(
+        replay = 0,
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val notificationEvents: SharedFlow<NotificationPacket> = _notificationEvents.asSharedFlow()
+
+    private val _dismissalEvents = MutableSharedFlow<String>(
+        replay = 0,
+        extraBufferCapacity = 64,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val dismissalEvents: SharedFlow<String> = _dismissalEvents.asSharedFlow()
+
+    fun sendNotificationDismissed(notificationId: String) {
+        _dismissalEvents.tryEmit(notificationId)
+    }
 
     private var targetHost: String = "192.168.1.100"
     private var targetPort: Int = 42424
@@ -242,8 +265,22 @@ class OmnilinkConnectionManager(
     /**
      * Extension point for Stream 2 notifications per docs/ANDROID_IMPLEMENTATION.md.
      */
+    fun sendNotification(packet: NotificationPacket) {
+        Log.d(TAG, "sendNotification dispatched (Stream 2): id=${packet.id}, app=${packet.appName}")
+        val emitted = _notificationEvents.tryEmit(packet)
+        if (!emitted) {
+            scope.launch {
+                _notificationEvents.emit(packet)
+            }
+        }
+    }
+
     fun sendNotification(packet: Any) {
-        Log.d(TAG, "sendNotification queued (Stream 2 extension point): $packet")
+        if (packet is NotificationPacket) {
+            sendNotification(packet)
+        } else {
+            Log.d(TAG, "sendNotification queued (Stream 2 extension point): $packet")
+        }
     }
 
     /**
