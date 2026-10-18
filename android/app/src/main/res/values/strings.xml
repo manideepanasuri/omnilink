@@ -1,0 +1,13 @@
+<resources>
+    <string name="app_name">Omnilink</string>
+    <string name="connection_status_title">Linux Desktop Link</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_connecting">Connecting…</string>
+    <string name="device_name_label">Host Device</string>
+    <string name="transport_label">Transport</string>
+    <string name="quick_actions_title">Quick Actions</string>
+    <string name="action_connect">Connect</string>
+    <string name="action_disconnect">Disconnect</string>
+    <string name="action_battery_optimization">Samsung One UI Battery Settings</string>
+</resources>

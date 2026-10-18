@@ -1,0 +1,22 @@
+[package]
+name = "omnilink-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Omnilink command-line interface tool"
+
+[[bin]]
+name = "omnilink"
+path = "src/main.rs"
+
+[dependencies]
+omnilink-protocol = { workspace = true }
+omnilink-daemon = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
