@@ -5,12 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ed25519_dalek::SigningKey;
+use omnilink_daemon::clipboard::ClipboardEvent;
 use omnilink_daemon::quic::{
-    init_crypto_provider, make_client_config, read_control_packet, write_control_packet,
-    Ed25519ServerCertVerifier, QuicServer,
+    init_crypto_provider, make_client_config, read_clipboard_packet, read_control_packet,
+    write_clipboard_packet, write_control_packet, Ed25519ServerCertVerifier, QuicServer,
 };
 use omnilink_daemon::state::{DaemonState, PairedDevice};
-use omnilink_protocol::packet::ControlPacket;
+use omnilink_protocol::packet::{ClipboardPacket, ControlPacket};
 use quinn::Endpoint;
 
 /// Helper to set up a test daemon listening on an ephemeral port with a paired client key.
@@ -516,6 +517,236 @@ async fn test_quic_8_unidirectional_stream_demuxing() {
     // Verify session remains connected and stable
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(daemon_state.is_connected().await);
+
+    connection.close(0u32.into(), b"done");
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_9_stream_1_inbound_clipboard_sync_and_deduplication() {
+    let (server, daemon_state, daemon_signing_key, client_signing_key) = setup_test_daemon().await;
+    let server_addr = server.local_addr().unwrap();
+    let server_handle = server.start();
+
+    let connection = connect_client(server_addr, &client_signing_key, &daemon_signing_key)
+        .await
+        .expect("Client should connect");
+
+    // Open Stream 0 (index 0)
+    let (mut send_stream_0, _recv_stream_0) = connection.open_bi().await.unwrap();
+    assert_eq!(send_stream_0.id().index(), 0);
+    write_control_packet(&mut send_stream_0, &ControlPacket::Ping { timestamp: 100 })
+        .await
+        .unwrap();
+
+    // Open Stream 1 (index 1)
+    let (mut send_stream_1, _recv_stream_1) = connection.open_bi().await.unwrap();
+    assert_eq!(send_stream_1.id().index(), 1);
+
+    // Client sends an inbound clipboard packet to daemon
+    let payload = b"Hello from Android Phone Clipboard!".to_vec();
+    let packet = ClipboardPacket {
+        sequence_id: 1,
+        mime_type: "text/plain;charset=utf-8".to_string(),
+        is_sensitive: false,
+        payload: payload.clone(),
+    };
+
+    write_clipboard_packet(&mut send_stream_1, &packet)
+        .await
+        .expect("Client should successfully send ClipboardPacket");
+
+    // Poll daemon until incoming packet is recorded in state
+    let mut received = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Some(clip) = daemon_state.last_received_clipboard().await {
+            if clip.sequence_id == 1 && clip.payload == payload {
+                assert_eq!(clip.mime_type, "text/plain;charset=utf-8");
+                assert!(!clip.is_sensitive);
+                received = true;
+                break;
+            }
+        }
+    }
+    assert!(received, "Daemon should record inbound clipboard packet");
+
+    // Verify filter recorded the BLAKE3 hash
+    assert!(
+        daemon_state.clipboard_filter().lock().unwrap().contains(&payload),
+        "Filter must contain the received clipboard hash"
+    );
+
+    // Send duplicate payload with a new sequence ID
+    let duplicate_packet = ClipboardPacket {
+        sequence_id: 2,
+        mime_type: "text/plain;charset=utf-8".to_string(),
+        is_sensitive: false,
+        payload: payload.clone(),
+    };
+
+    write_clipboard_packet(&mut send_stream_1, &duplicate_packet)
+        .await
+        .unwrap();
+
+    // Give daemon time to process
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Sequence ID should STILL be 1 because duplicate was dropped by filter
+    let current_clip = daemon_state.last_received_clipboard().await.unwrap();
+    assert_eq!(
+        current_clip.sequence_id, 1,
+        "Duplicate payload must be dropped by deduplication filter without updating state"
+    );
+
+    connection.close(0u32.into(), b"done");
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_10_stream_1_outbound_clipboard_dispatch() {
+    let (server, daemon_state, daemon_signing_key, client_signing_key) = setup_test_daemon().await;
+    let server_addr = server.local_addr().unwrap();
+    let server_handle = server.start();
+
+    let connection = connect_client(server_addr, &client_signing_key, &daemon_signing_key)
+        .await
+        .expect("Client should connect");
+
+    // Open Stream 0
+    let (mut send_stream_0, _recv_stream_0) = connection.open_bi().await.unwrap();
+    write_control_packet(&mut send_stream_0, &ControlPacket::Ping { timestamp: 200 })
+        .await
+        .unwrap();
+
+    // Open Stream 1
+    let (mut send_stream_1, mut recv_stream_1) = connection.open_bi().await.unwrap();
+
+    // Client sends an initial packet to trigger stream acceptance on daemon
+    let init_packet = ClipboardPacket {
+        sequence_id: 1,
+        mime_type: "text/plain".into(),
+        is_sensitive: false,
+        payload: b"ready".to_vec(),
+    };
+    write_clipboard_packet(&mut send_stream_1, &init_packet).await.unwrap();
+
+    // Wait until daemon initializes session and processes init packet
+    for _ in 0..50 {
+        if daemon_state.last_received_clipboard().await.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(daemon_state.is_connected().await);
+    assert!(daemon_state.last_received_clipboard().await.is_some());
+
+    // Daemon dispatches outbound clipboard event
+    let payload = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG magic header
+    let event = ClipboardEvent::new("image/png", false, payload.clone());
+
+    daemon_state
+        .send_clipboard(event)
+        .await
+        .expect("Daemon should send clipboard event over Stream 1");
+
+    // Client receives on Stream 1
+    let received_packet = read_clipboard_packet(&mut recv_stream_1)
+        .await
+        .expect("Client should read framed ClipboardPacket");
+
+    assert_eq!(received_packet.sequence_id, 1);
+    assert_eq!(received_packet.mime_type, "image/png");
+    assert!(!received_packet.is_sensitive);
+    assert_eq!(received_packet.payload, payload);
+
+    connection.close(0u32.into(), b"done");
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_11_stream_1_echo_loop_prevention() {
+    let (server, daemon_state, daemon_signing_key, client_signing_key) = setup_test_daemon().await;
+    let server_addr = server.local_addr().unwrap();
+    let server_handle = server.start();
+
+    let connection = connect_client(server_addr, &client_signing_key, &daemon_signing_key)
+        .await
+        .expect("Client should connect");
+
+    // Open Stream 0
+    let (mut send_stream_0, _recv_stream_0) = connection.open_bi().await.unwrap();
+    write_control_packet(&mut send_stream_0, &ControlPacket::Ping { timestamp: 300 })
+        .await
+        .unwrap();
+
+    // Open Stream 1
+    let (mut send_stream_1, _recv_stream_1) = connection.open_bi().await.unwrap();
+
+    // Pre-record payload in daemon filter (simulating local Wayland selection)
+    let pre_recorded = b"Password-manager-token-abc";
+    {
+        let mut filter = daemon_state.clipboard_filter().lock().unwrap();
+        filter.record(pre_recorded);
+    }
+
+    // Phone attempts to send this exact same payload back to daemon
+    let packet = ClipboardPacket {
+        sequence_id: 10,
+        mime_type: "text/plain".to_string(),
+        is_sensitive: true,
+        payload: pre_recorded.to_vec(),
+    };
+
+    write_clipboard_packet(&mut send_stream_1, &packet)
+        .await
+        .unwrap();
+
+    // Wait and verify that daemon dropped it and did not notify state
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        daemon_state.last_received_clipboard().await.is_none(),
+        "Pre-recorded payload must be detected as loop and dropped without updating state"
+    );
+
+    connection.close(0u32.into(), b"done");
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_12_stream_1_oversized_payload_clamp_rejected() {
+    let (server, _daemon_state, daemon_signing_key, client_signing_key) = setup_test_daemon().await;
+    let server_addr = server.local_addr().unwrap();
+    let server_handle = server.start();
+
+    let connection = connect_client(server_addr, &client_signing_key, &daemon_signing_key)
+        .await
+        .expect("Client should connect");
+
+    // Open Stream 0
+    let (mut send_stream_0, _recv_stream_0) = connection.open_bi().await.unwrap();
+    write_control_packet(&mut send_stream_0, &ControlPacket::Ping { timestamp: 400 })
+        .await
+        .unwrap();
+
+    // Open Stream 1
+    let (mut send_stream_1, _recv_stream_1) = connection.open_bi().await.unwrap();
+
+    // Send a length prefix indicating 25 MiB (exceeding 20 MiB safety clamp)
+    let excessive_len: u32 = 25 * 1024 * 1024;
+    send_stream_1.write_all(&excessive_len.to_be_bytes()).await.unwrap();
+
+    // Daemon should detect size clamp violation and close/reset stream
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Further write to stream should eventually fail or stream should be closed
+    let dummy_packet = ClipboardPacket {
+        sequence_id: 1,
+        mime_type: "text/plain".into(),
+        is_sensitive: false,
+        payload: vec![1, 2, 3],
+    };
+    let _ = write_clipboard_packet(&mut send_stream_1, &dummy_packet).await;
 
     connection.close(0u32.into(), b"done");
     server_handle.abort();

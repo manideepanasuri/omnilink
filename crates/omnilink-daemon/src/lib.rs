@@ -28,9 +28,10 @@ pub use pairing::{
 };
 pub use quic::{
     extract_ed25519_verifying_key, generate_client_certificate, generate_daemon_certificate,
-    init_crypto_provider, make_client_config, make_server_config, read_control_packet,
-    run_stream_0, write_control_packet, Ed25519ClientCertVerifier, Ed25519ServerCertVerifier,
-    QuicError, QuicListener, QuicServer, ALPN_OMNILINK, HEARTBEAT_TIMEOUT,
+    init_crypto_provider, make_client_config, make_server_config, read_clipboard_packet,
+    read_control_packet, run_stream_0, run_stream_1, write_clipboard_packet, write_control_packet,
+    Ed25519ClientCertVerifier, Ed25519ServerCertVerifier, QuicError, QuicListener, QuicServer,
+    ALPN_OMNILINK, HEARTBEAT_TIMEOUT, MAX_CLIPBOARD_FRAME_LEN,
 };
 pub use state::{ActiveSession, DaemonState, PairedDevice, SessionState};
 

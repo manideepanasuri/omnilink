@@ -197,7 +197,6 @@ class OmnilinkSyncService : Service() {
         serviceScope.launch {
             clipboard.clipboardEvents.collect { event ->
                 Log.d(TAG, "Captured clipboard event for synchronization: mime=${event.mimeType}, size=${event.payload.size}")
-                ServiceLocator.connectionManager.sendClipboard(event)
             }
         }
     }

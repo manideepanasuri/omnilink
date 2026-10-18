@@ -50,6 +50,45 @@ object StreamFraming {
     }
 
     /**
+     * Reads exactly [length] bytes from [inputStream].
+     * If [allowEof] is true and EOF is encountered when 0 bytes were read, returns null.
+     * Throws [IllegalStateException] if EOF is reached before [length] bytes are read.
+     */
+    fun readExact(inputStream: InputStream, length: Int, allowEof: Boolean = false): ByteArray? {
+        if (length == 0) return ByteArray(0)
+        val buf = ByteArray(length)
+        var bytesRead = 0
+        while (bytesRead < length) {
+            val count = inputStream.read(buf, bytesRead, length - bytesRead)
+            if (count == -1) {
+                if (bytesRead == 0 && allowEof) return null
+                throw IllegalStateException("Unexpected EOF: expected $length bytes, read $bytesRead")
+            }
+            bytesRead += count
+        }
+        return buf
+    }
+
+    /**
+     * Reads exactly enough bytes to fill [target] from [inputStream].
+     * If [allowEof] is true and EOF is encountered when 0 bytes were read, returns false.
+     * Throws [IllegalStateException] if EOF is reached before filling [target].
+     */
+    fun readExact(inputStream: InputStream, target: ByteArray, allowEof: Boolean = false): Boolean {
+        if (target.isEmpty()) return true
+        var bytesRead = 0
+        while (bytesRead < target.size) {
+            val count = inputStream.read(target, bytesRead, target.size - bytesRead)
+            if (count == -1) {
+                if (bytesRead == 0 && allowEof) return false
+                throw IllegalStateException("Unexpected EOF: expected ${target.size} bytes, read $bytesRead")
+            }
+            bytesRead += count
+        }
+        return true
+    }
+
+    /**
      * Reads a single 4-byte BE length-prefixed frame from an InputStream.
      * Returns null on clean EOF when no bytes have been read.
      */

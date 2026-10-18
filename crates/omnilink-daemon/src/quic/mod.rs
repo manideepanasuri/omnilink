@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod demux;
 pub mod server;
 pub mod stream0;
+pub mod stream1;
 
 pub use crypto::{
     extract_ed25519_verifying_key, generate_client_certificate, generate_daemon_certificate,
@@ -13,6 +14,9 @@ pub use crypto::{
 pub use demux::handle_connection;
 pub use server::{QuicListener, QuicServer, DEFAULT_PORT};
 pub use stream0::{read_control_packet, run_stream_0, write_control_packet, HEARTBEAT_TIMEOUT};
+pub use stream1::{
+    read_clipboard_packet, run_stream_1, write_clipboard_packet, MAX_CLIPBOARD_FRAME_LEN,
+};
 
 use omnilink_protocol::error::ProtocolError;
 use thiserror::Error;

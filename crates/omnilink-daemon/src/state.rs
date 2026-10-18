@@ -1,11 +1,13 @@
 //! Daemon and active connection session state.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use omnilink_protocol::packet::ControlPacket;
+use omnilink_protocol::packet::{ClipboardPacket, ControlPacket};
 use omnilink_protocol::types::DeviceStatus;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
+
+use crate::clipboard::{ClipboardEvent, ClipboardFilter};
 
 /// Information about a paired companion device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +31,8 @@ pub struct ActiveSession {
     pub connection_id: usize,
     /// Outbound command dispatch channel for Stream 0.
     pub command_tx: tokio::sync::mpsc::Sender<ControlPacket>,
+    /// Outbound clipboard dispatch channel for Stream 1.
+    pub clipboard_tx: tokio::sync::mpsc::Sender<ClipboardEvent>,
     /// Device battery charge percentage (0..100).
     pub battery_pct: u8,
     /// Whether the device is connected to power/charging.
@@ -49,6 +53,7 @@ impl ActiveSession {
         device_id: impl Into<String>,
         connection: quinn::Connection,
         command_tx: tokio::sync::mpsc::Sender<ControlPacket>,
+        clipboard_tx: tokio::sync::mpsc::Sender<ClipboardEvent>,
     ) -> Self {
         let connection_id = connection.stable_id();
         Self {
@@ -56,6 +61,7 @@ impl ActiveSession {
             connection,
             connection_id,
             command_tx,
+            clipboard_tx,
             battery_pct: 0,
             is_charging: false,
             wifi_ssid: None,
@@ -81,6 +87,19 @@ impl ActiveSession {
         packet: ControlPacket,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<ControlPacket>> {
         self.command_tx.send(packet).await
+    }
+
+    /// Returns a reference to the outbound clipboard channel sender for Stream 1.
+    pub fn clipboard_sender(&self) -> &tokio::sync::mpsc::Sender<ClipboardEvent> {
+        &self.clipboard_tx
+    }
+
+    /// Sends an outbound clipboard event to the companion over Stream 1.
+    pub async fn send_clipboard(
+        &self,
+        event: ClipboardEvent,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<ClipboardEvent>> {
+        self.clipboard_tx.send(event).await
     }
 
     /// Updates session telemetry fields from a received `DeviceStatus`.
@@ -120,6 +139,12 @@ pub struct DaemonState {
     pub paired_verifier_key: Arc<std::sync::RwLock<Option<VerifyingKey>>>,
     /// Active authenticated connection session, if connected.
     pub session: RwLock<Option<ActiveSession>>,
+    /// BLAKE3 circular buffer filter for loop and echo detection.
+    pub clipboard_filter: Arc<std::sync::Mutex<ClipboardFilter>>,
+    /// Last received inbound clipboard packet from remote companion.
+    pub last_received_clipboard: RwLock<Option<ClipboardPacket>>,
+    /// Inbound clipboard notification broadcast channel.
+    pub inbound_clipboard_tx: tokio::sync::broadcast::Sender<ClipboardPacket>,
 }
 
 /// Type alias for `DaemonState` to support `SessionState` naming convention.
@@ -129,11 +154,34 @@ impl DaemonState {
     /// Creates a new `DaemonState` with the provided identity and optional paired device.
     pub fn new(identity: SigningKey, paired_device: Option<PairedDevice>) -> Self {
         let initial_key = paired_device.as_ref().map(|d| d.public_key);
+        let (inbound_clipboard_tx, _) = tokio::sync::broadcast::channel(32);
         Self {
             identity,
             paired_device: RwLock::new(paired_device),
             paired_verifier_key: Arc::new(std::sync::RwLock::new(initial_key)),
             session: RwLock::new(None),
+            clipboard_filter: Arc::new(std::sync::Mutex::new(ClipboardFilter::new())),
+            last_received_clipboard: RwLock::new(None),
+            inbound_clipboard_tx,
+        }
+    }
+
+    /// Creates a new `DaemonState` sharing a pre-existing `ClipboardFilter`.
+    pub fn with_filter(
+        identity: SigningKey,
+        paired_device: Option<PairedDevice>,
+        clipboard_filter: Arc<std::sync::Mutex<ClipboardFilter>>,
+    ) -> Self {
+        let initial_key = paired_device.as_ref().map(|d| d.public_key);
+        let (inbound_clipboard_tx, _) = tokio::sync::broadcast::channel(32);
+        Self {
+            identity,
+            paired_device: RwLock::new(paired_device),
+            paired_verifier_key: Arc::new(std::sync::RwLock::new(initial_key)),
+            session: RwLock::new(None),
+            clipboard_filter,
+            last_received_clipboard: RwLock::new(None),
+            inbound_clipboard_tx,
         }
     }
 
@@ -183,6 +231,58 @@ impl DaemonState {
         } else {
             Err(tokio::sync::mpsc::error::SendError(packet))
         }
+    }
+
+    /// Returns a reference to the shared clipboard filter.
+    pub fn clipboard_filter(&self) -> &Arc<std::sync::Mutex<ClipboardFilter>> {
+        &self.clipboard_filter
+    }
+
+    /// Dispatches an outbound clipboard event to the companion over Stream 1, if connected.
+    pub async fn send_clipboard(
+        &self,
+        event: ClipboardEvent,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<ClipboardEvent>> {
+        let session_lock = self.session.read().await;
+        if let Some(ref session) = *session_lock {
+            session.send_clipboard(event).await
+        } else {
+            Err(tokio::sync::mpsc::error::SendError(event))
+        }
+    }
+
+    /// Dispatches an outbound clipboard event to the companion over Stream 1 (alias for `send_clipboard`).
+    pub async fn send_clipboard_event(
+        &self,
+        event: ClipboardEvent,
+    ) -> Result<(), tokio::sync::mpsc::error::SendError<ClipboardEvent>> {
+        self.send_clipboard(event).await
+    }
+
+    /// Returns a clone of the outbound clipboard sender for the active session, if connected.
+    pub async fn clipboard_tx(&self) -> Option<tokio::sync::mpsc::Sender<ClipboardEvent>> {
+        self.session.read().await.as_ref().map(|s| s.clipboard_tx.clone())
+    }
+
+    /// Records an inbound clipboard packet from remote companion into local filter and state.
+    pub async fn notify_inbound_clipboard(&self, packet: ClipboardPacket) {
+        {
+            let mut filter = self.clipboard_filter.lock().unwrap();
+            filter.record(&packet.payload);
+        }
+        let mut last = self.last_received_clipboard.write().await;
+        *last = Some(packet.clone());
+        let _ = self.inbound_clipboard_tx.send(packet);
+    }
+
+    /// Returns the last received inbound clipboard packet, if any.
+    pub async fn last_received_clipboard(&self) -> Option<ClipboardPacket> {
+        self.last_received_clipboard.read().await.clone()
+    }
+
+    /// Subscribes to inbound clipboard packets received from the remote companion.
+    pub fn subscribe_inbound_clipboard(&self) -> tokio::sync::broadcast::Receiver<ClipboardPacket> {
+        self.inbound_clipboard_tx.subscribe()
     }
 
     /// Drops the active session only if the provided stable_id matches the current active connection.

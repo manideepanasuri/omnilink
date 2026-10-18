@@ -5,6 +5,7 @@ use std::sync::Arc;
 use quinn::Connection;
 
 use crate::quic::stream0::run_stream_0;
+use crate::quic::stream1::run_stream_1;
 use crate::quic::QuicError;
 use crate::state::{ActiveSession, DaemonState};
 
@@ -23,9 +24,19 @@ pub async fn handle_connection(
         (tx, Some(rx))
     };
 
+    let (clipboard_tx, mut clipboard_rx_opt) = {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        (tx, Some(rx))
+    };
+
     // Initialize active session telemetry
     {
-        let session = ActiveSession::new(device_id.clone(), connection.clone(), command_tx);
+        let session = ActiveSession::new(
+            device_id.clone(),
+            connection.clone(),
+            command_tx,
+            clipboard_tx,
+        );
         *state.session.write().await = Some(session);
     }
 
@@ -57,8 +68,17 @@ pub async fn handle_connection(
                                     }
                                 }
                                 1 => {
-                                    // Stream 1 (Bi): Bidirectional Clipboard Sync (Extension point)
-                                    tracing::info!("Accepted Stream 1 (Clipboard Sync) - ready for pump");
+                                    // Stream 1 (Bi): Bidirectional Clipboard Sync
+                                    let s_clone = state.clone();
+                                    if let Some(clipboard_rx) = clipboard_rx_opt.take() {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = run_stream_1(send_stream, recv_stream, s_clone, clipboard_rx).await {
+                                                tracing::debug!(error = %e, "Stream 1 finished");
+                                            }
+                                        });
+                                    } else {
+                                        tracing::warn!("Stream 1 already established for this connection, rejecting duplicate");
+                                    }
                                 }
                                 2 => {
                                     // Stream 2 (Bi): Notifications & Action Replies (Extension point)

@@ -36,7 +36,15 @@ class OmnilinkConnectionManager(
 
     private var connectionJob: Job? = null
     private var currentSession: Stream0Session? = null
+    private var stream1Session: Stream1Session? = null
     private var activeSocket: Socket? = null
+    private var stream1Socket: Socket? = null
+
+    val currentStream0Session: Stream0Session?
+        get() = currentSession
+
+    val currentStream1Session: Stream1Session?
+        get() = stream1Session
 
     @Volatile
     private var shouldBeConnected = false
@@ -134,6 +142,9 @@ class OmnilinkConnectionManager(
                     currentSession = session
                     session.start()
 
+                    // Automatically initialize and pump Stream 1 clipboard sync
+                    initStream1Session(host, port)
+
                     // Suspend non-blockingly until session is terminated or coroutine is cancelled
                     sessionEnded.await()
                 } catch (e: CancellationException) {
@@ -159,7 +170,45 @@ class OmnilinkConnectionManager(
         }
     }
 
+    fun attachStream1Session(session: Stream1Session) {
+        stream1Session?.close()
+        stream1Session = session
+        session.start()
+    }
+
+    private fun initStream1Session(host: String, port: Int) {
+        try {
+            val s1 = Socket()
+            s1.tcpNoDelay = true
+            s1.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+            stream1Socket = s1
+            val session = Stream1Session(
+                inputStream = s1.getInputStream(),
+                outputStream = s1.getOutputStream(),
+                clipboardManager = org.omnilink.ServiceLocator.clipboardManager,
+                scope = scope,
+                onDisconnect = { cause ->
+                    Log.i(TAG, "Stream 1 session ended: ${cause?.message}")
+                }
+            )
+            attachStream1Session(session)
+            Log.i(TAG, "Stream 1 clipboard session initialized and pumping")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to connect Stream 1 socket to $host:$port: ${e.message}")
+        }
+    }
+
     private fun closeCurrentSession() {
+        try {
+            stream1Session?.close()
+        } catch (_: Exception) {}
+        stream1Session = null
+
+        try {
+            stream1Socket?.close()
+        } catch (_: Exception) {}
+        stream1Socket = null
+
         try {
             currentSession?.close()
         } catch (_: Exception) {}
@@ -198,10 +247,37 @@ class OmnilinkConnectionManager(
     }
 
     /**
-     * Extension point for Stream 1 clipboard synchronization per docs/SUBSYSTEMS.md Section 1.
+     * Sends clipboard content via Stream 1 session.
      */
     fun sendClipboard(event: Any) {
-        Log.d(TAG, "sendClipboard queued (Stream 1 extension point): $event")
+        val session = stream1Session
+        if (session != null && !session.isClosed) {
+            when (event) {
+                is org.omnilink.protocol.ClipboardPacket -> {
+                    scope.launch {
+                        try {
+                            session.sendPacket(event)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to send ClipboardPacket: ${e.message}")
+                        }
+                    }
+                }
+                is org.omnilink.clipboard.ClipboardSyncEvent -> {
+                    scope.launch {
+                        try {
+                            session.sendClipboardSyncEvent(event)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to send ClipboardSyncEvent: ${e.message}")
+                        }
+                    }
+                }
+                else -> {
+                    Log.w(TAG, "sendClipboard called with unsupported type: ${event::class.java.name}")
+                }
+            }
+        } else {
+            Log.d(TAG, "Stream 1 session not connected, dropping clipboard event")
+        }
     }
 
     companion object {
