@@ -33,6 +33,10 @@ object ServiceLocator {
         OmnilinkConnectionManager(context)
     }
 
+    val bleAdvertiser: org.omnilink.ble.BleProximityAdvertiser by lazy {
+        org.omnilink.ble.BleProximityAdvertiser(context)
+    }
+
     @Volatile
     var syncService: OmnilinkSyncService? = null
 }

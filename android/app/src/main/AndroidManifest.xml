@@ -24,6 +24,7 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
     <!-- Notifications & Battery Optimization Exemption for Samsung One UI -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

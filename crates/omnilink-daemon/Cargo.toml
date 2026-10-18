@@ -24,3 +24,7 @@ libc = { workspace = true }
 quinn = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
+bluer = { workspace = true }
+uuid = { workspace = true }
+futures = { workspace = true }
+

@@ -3,11 +3,15 @@
 //! Provides identity key management, onboarding pairing generator,
 //! mutual TLS 1.3 QUIC endpoint listener, and session orchestration.
 
+pub mod ble;
 pub mod identity;
 pub mod pairing;
 pub mod quic;
 pub mod state;
 
+pub use ble::{
+    verify_beacon_payload, BleDiscoveryEvent, BleError, BleScanner, OMNILINK_SERVICE_UUID,
+};
 pub use identity::{
     default_key_path, load_identity, load_or_generate_identity, save_identity,
     validate_directory_permissions, validate_file_permissions, IdentityError,

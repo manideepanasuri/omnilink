@@ -47,6 +47,7 @@ class OmnilinkSyncService : Service() {
         initWakeLock()
         initNetworkCallback()
         initTelemetry()
+        initBleAdvertising()
         observeConnectionState()
     }
 
@@ -88,6 +89,8 @@ class OmnilinkSyncService : Service() {
         releaseWakeLock()
         unregisterNetworkCallback()
         telemetryCollector?.stop()
+        ServiceLocator.bleAdvertiser.unregisterTriggers(applicationContext)
+        ServiceLocator.bleAdvertiser.stopAdvertising()
         serviceScope.cancel()
         ServiceLocator.syncService = null
         Log.i(TAG, "OmnilinkSyncService destroyed")
@@ -142,6 +145,12 @@ class OmnilinkSyncService : Service() {
                 telemetryCollector?.refreshAndNotify { status ->
                     ServiceLocator.connectionManager.sendDeviceStatus(status)
                 }
+                if (isWifi) {
+                    val token = ServiceLocator.identityKeyStore.getPairedDevice()?.token
+                    if (!token.isNullOrBlank()) {
+                        ServiceLocator.bleAdvertiser.onWifiChanged(token)
+                    }
+                }
             }
         }
         networkCallback = callback
@@ -166,6 +175,17 @@ class OmnilinkSyncService : Service() {
     private fun initTelemetry() {
         val collector = DeviceTelemetryCollector(applicationContext)
         telemetryCollector = collector
+    }
+
+    private fun initBleAdvertising() {
+        val advertiser = ServiceLocator.bleAdvertiser
+        advertiser.registerTriggers(applicationContext) {
+            ServiceLocator.identityKeyStore.getPairedDevice()?.token
+        }
+        val pairedToken = ServiceLocator.identityKeyStore.getPairedDevice()?.token
+        if (!pairedToken.isNullOrBlank()) {
+            advertiser.startAdvertising(pairedToken)
+        }
     }
 
     private fun observeConnectionState() {
