@@ -27,4 +27,8 @@ rustls = { workspace = true }
 bluer = { workspace = true }
 uuid = { workspace = true }
 futures = { workspace = true }
+blake3 = { workspace = true }
+wayland-client = { workspace = true }
+wayland-protocols = { workspace = true }
+wayland-protocols-wlr = { workspace = true }
 

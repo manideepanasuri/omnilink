@@ -4,6 +4,7 @@
 //! mutual TLS 1.3 QUIC endpoint listener, and session orchestration.
 
 pub mod ble;
+pub mod clipboard;
 pub mod identity;
 pub mod pairing;
 pub mod quic;
@@ -11,6 +12,11 @@ pub mod state;
 
 pub use ble::{
     verify_beacon_payload, BleDiscoveryEvent, BleError, BleScanner, OMNILINK_SERVICE_UUID,
+};
+pub use clipboard::{
+    is_sensitive_mime_type, normalize_mime_type, select_best_mime_type, spawn_clipboard_listener,
+    ClipboardError, ClipboardEvent, ClipboardFilter, ClipboardHandle, ClipboardListener,
+    DEFAULT_FILTER_CAPACITY, MAX_CLIPBOARD_PAYLOAD_SIZE, SUPPORTED_MIME_TYPES,
 };
 pub use identity::{
     default_key_path, load_identity, load_or_generate_identity, save_identity,
@@ -27,3 +33,4 @@ pub use quic::{
     QuicError, QuicListener, QuicServer, ALPN_OMNILINK, HEARTBEAT_TIMEOUT,
 };
 pub use state::{ActiveSession, DaemonState, PairedDevice, SessionState};
+

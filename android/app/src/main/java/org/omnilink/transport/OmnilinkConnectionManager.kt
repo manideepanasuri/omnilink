@@ -197,6 +197,13 @@ class OmnilinkConnectionManager(
         Log.d(TAG, "sendNotification queued (Stream 2 extension point): $packet")
     }
 
+    /**
+     * Extension point for Stream 1 clipboard synchronization per docs/SUBSYSTEMS.md Section 1.
+     */
+    fun sendClipboard(event: Any) {
+        Log.d(TAG, "sendClipboard queued (Stream 1 extension point): $event")
+    }
+
     companion object {
         private const val TAG = "OmnilinkConnMgr"
         private const val CONNECT_TIMEOUT_MS = 6000

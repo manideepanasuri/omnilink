@@ -37,7 +37,7 @@ libc = "0.2"
 # Linux Desktop Integration
 zbus = { version = "5.0", features = ["tokio"] }
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 bluer = { version = "0.17", features = ["bluetoothd"] }
 pipewire = { version = "0.8" }

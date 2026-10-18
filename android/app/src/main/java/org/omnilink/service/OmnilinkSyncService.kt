@@ -48,6 +48,7 @@ class OmnilinkSyncService : Service() {
         initNetworkCallback()
         initTelemetry()
         initBleAdvertising()
+        initClipboardSync()
         observeConnectionState()
     }
 
@@ -73,6 +74,7 @@ class OmnilinkSyncService : Service() {
             }
             ACTION_STOP -> {
                 ServiceLocator.connectionManager.disconnect()
+                ServiceLocator.clipboardManager.stopListening()
                 releaseWakeLock()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -91,6 +93,7 @@ class OmnilinkSyncService : Service() {
         telemetryCollector?.stop()
         ServiceLocator.bleAdvertiser.unregisterTriggers(applicationContext)
         ServiceLocator.bleAdvertiser.stopAdvertising()
+        ServiceLocator.clipboardManager.stopListening()
         serviceScope.cancel()
         ServiceLocator.syncService = null
         Log.i(TAG, "OmnilinkSyncService destroyed")
@@ -185,6 +188,17 @@ class OmnilinkSyncService : Service() {
         val pairedToken = ServiceLocator.identityKeyStore.getPairedDevice()?.token
         if (!pairedToken.isNullOrBlank()) {
             advertiser.startAdvertising(pairedToken)
+        }
+    }
+
+    private fun initClipboardSync() {
+        val clipboard = ServiceLocator.clipboardManager
+        clipboard.startListening()
+        serviceScope.launch {
+            clipboard.clipboardEvents.collect { event ->
+                Log.d(TAG, "Captured clipboard event for synchronization: mime=${event.mimeType}, size=${event.payload.size}")
+                ServiceLocator.connectionManager.sendClipboard(event)
+            }
         }
     }
 

@@ -37,6 +37,10 @@ object ServiceLocator {
         org.omnilink.ble.BleProximityAdvertiser(context)
     }
 
+    val clipboardManager: org.omnilink.clipboard.OmnilinkClipboardManager by lazy {
+        org.omnilink.clipboard.OmnilinkClipboardManager(context)
+    }
+
     @Volatile
     var syncService: OmnilinkSyncService? = null
 }
