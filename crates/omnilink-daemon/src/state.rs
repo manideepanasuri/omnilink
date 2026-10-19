@@ -11,6 +11,7 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 
 use crate::clipboard::{ClipboardEvent, ClipboardFilter};
+use crate::ipc::IpcEvent;
 use crate::notifications::NotificationForwarder;
 
 /// Information about a paired companion device.
@@ -169,6 +170,8 @@ pub struct DaemonState {
     pub inbound_reply_tx: tokio::sync::broadcast::Sender<NotificationReplyPacket>,
     /// Inbound notification dismissal broadcast channel.
     pub inbound_dismiss_tx: tokio::sync::broadcast::Sender<NotificationDismissPacket>,
+    /// IPC broadcast event channel.
+    pub ipc_broadcast_tx: tokio::sync::broadcast::Sender<IpcEvent>,
 }
 
 /// Type alias for `DaemonState` to support `SessionState` naming convention.
@@ -182,6 +185,7 @@ impl DaemonState {
         let (inbound_notification_tx, _) = tokio::sync::broadcast::channel(32);
         let (inbound_reply_tx, _) = tokio::sync::broadcast::channel(32);
         let (inbound_dismiss_tx, _) = tokio::sync::broadcast::channel(32);
+        let (ipc_broadcast_tx, _) = tokio::sync::broadcast::channel(128);
         Self {
             identity,
             paired_device: RwLock::new(paired_device),
@@ -194,6 +198,7 @@ impl DaemonState {
             inbound_notification_tx,
             inbound_reply_tx,
             inbound_dismiss_tx,
+            ipc_broadcast_tx,
         }
     }
 
@@ -208,6 +213,7 @@ impl DaemonState {
         let (inbound_notification_tx, _) = tokio::sync::broadcast::channel(32);
         let (inbound_reply_tx, _) = tokio::sync::broadcast::channel(32);
         let (inbound_dismiss_tx, _) = tokio::sync::broadcast::channel(32);
+        let (ipc_broadcast_tx, _) = tokio::sync::broadcast::channel(128);
         Self {
             identity,
             paired_device: RwLock::new(paired_device),
@@ -220,6 +226,7 @@ impl DaemonState {
             inbound_notification_tx,
             inbound_reply_tx,
             inbound_dismiss_tx,
+            ipc_broadcast_tx,
         }
     }
 
@@ -328,9 +335,56 @@ impl DaemonState {
             let mut filter = self.clipboard_filter.lock().unwrap();
             filter.record(&packet.payload);
         }
+        let preview = if packet.is_sensitive {
+            "<sensitive content redacted>".to_string()
+        } else if packet.mime_type.starts_with("text/") {
+            let text = String::from_utf8_lossy(&packet.payload);
+            if text.chars().count() > 120 {
+                let mut truncated: String = text.chars().take(120).collect();
+                truncated.push_str("...");
+                truncated
+            } else {
+                text.to_string()
+            }
+        } else {
+            format!("<{} bytes>", packet.payload.len())
+        };
         let mut last = self.last_received_clipboard.write().await;
         *last = Some(packet.clone());
-        let _ = self.inbound_clipboard_tx.send(packet);
+        let _ = self.inbound_clipboard_tx.send(packet.clone());
+        self.broadcast_clipboard_updated(&packet.mime_type, &preview);
+    }
+
+    /// Broadcasts an IPC event to all connected local IPC clients (e.g. CLI, GUI).
+    pub fn broadcast_ipc_event(&self, event: IpcEvent) {
+        let _ = self.ipc_broadcast_tx.send(event);
+    }
+
+    /// Subscribes to daemon IPC broadcast events.
+    pub fn subscribe_ipc_events(&self) -> tokio::sync::broadcast::Receiver<IpcEvent> {
+        self.ipc_broadcast_tx.subscribe()
+    }
+
+    /// Broadcasts a device status change event to connected IPC clients.
+    pub fn broadcast_device_status(&self, status: &DeviceStatus) {
+        self.broadcast_ipc_event(IpcEvent::device_status_changed(status));
+    }
+
+    /// Broadcasts a clipboard update event to connected IPC clients.
+    pub fn broadcast_clipboard_updated(
+        &self,
+        mime_type: impl Into<String>,
+        preview: impl Into<String>,
+    ) {
+        self.broadcast_ipc_event(IpcEvent::clipboard_updated(mime_type, preview));
+    }
+
+    /// Updates active session status and broadcasts status change to IPC clients.
+    pub async fn update_device_status(&self, status: DeviceStatus) {
+        if let Some(ref mut session) = *self.session.write().await {
+            session.update_status(status.clone());
+        }
+        self.broadcast_device_status(&status);
     }
 
     /// Returns the last received inbound clipboard packet, if any.

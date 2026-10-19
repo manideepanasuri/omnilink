@@ -183,8 +183,9 @@ pub async fn run_stream_0(
                                     hotspot_active,
                                 };
                                 if let Some(ref mut session) = *state.session.write().await {
-                                    session.update_status(status);
+                                    session.update_status(status.clone());
                                 }
+                                state.broadcast_device_status(&status);
                             }
                             ControlPacket::Command { action } => {
                                 tracing::debug!(stable_id, ?action, "Stream 0 received Command");

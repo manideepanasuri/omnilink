@@ -6,6 +6,7 @@
 pub mod ble;
 pub mod clipboard;
 pub mod identity;
+pub mod ipc;
 pub mod notifications;
 pub mod pairing;
 pub mod quic;
@@ -38,6 +39,10 @@ pub use quic::{
 pub use notifications::{
     format_notification_actions, start_dbus_signal_listener, FreedesktopNotificationsProxy,
     NotificationError, NotificationForwarder, NotificationMap,
+};
+pub use ipc::{
+    calculate_socket_path, default_socket_path, socket_path_for_uid, IpcClient, IpcError,
+    IpcEvent, IpcHandle, IpcServer, JsonRpcError, JsonRpcRequest, JsonRpcResponse, StatusGetResult,
 };
 pub use state::{ActiveSession, DaemonState, PairedDevice, SessionState};
 
