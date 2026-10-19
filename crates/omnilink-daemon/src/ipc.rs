@@ -315,6 +315,20 @@ pub async fn handle_ipc_request(line: &str, state: &Arc<DaemonState>) -> JsonRpc
                 Err(_) => JsonRpcResponse::device_not_connected(id),
             }
         }
+        "device.ring_phone" => {
+            if !params.is_null() && !params.is_object() {
+                return JsonRpcResponse::invalid_params(id, "params must be an object or omitted");
+            }
+            match state
+                .send_command(ControlPacket::Command {
+                    action: CommandAction::RingPhone,
+                })
+                .await
+            {
+                Ok(()) => JsonRpcResponse::success(id, serde_json::json!({ "success": true })),
+                Err(_) => JsonRpcResponse::device_not_connected(id),
+            }
+        }
         "notification.reply" => {
             #[derive(Deserialize)]
             struct ReplyParams {

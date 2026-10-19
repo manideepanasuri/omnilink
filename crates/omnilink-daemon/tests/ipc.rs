@@ -351,6 +351,30 @@ async fn test_ipc_device_toggle_hotspot_disconnected_and_connected() {
 }
 
 #[tokio::test]
+async fn test_ipc_device_ring_phone() {
+    let path = temp_socket_path();
+    let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+    let state = Arc::new(DaemonState::new(signing_key, None));
+
+    let ipc_handle = IpcServer::bind(Some(&path), state.clone())
+        .await
+        .expect("bind server");
+    let mut client = IpcClient::connect(&path).await.expect("connect client");
+
+    // 1. Disconnected -> error -32000
+    let req = JsonRpcRequest {
+        jsonrpc: Some("2.0".to_string()),
+        id: Some(serde_json::json!(101)),
+        method: "device.ring_phone".to_string(),
+        params: None,
+    };
+    let resp = client.request(&req).await.expect("request");
+    assert_eq!(resp.error.unwrap().code, -32000);
+
+    ipc_handle.stop().await;
+}
+
+#[tokio::test]
 async fn test_ipc_notification_reply_and_dismiss() {
     let path = temp_socket_path();
     let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);

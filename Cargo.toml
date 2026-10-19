@@ -3,6 +3,7 @@ members = [
     "crates/omnilink-protocol",
     "crates/omnilink-daemon",
     "crates/omnilink-cli",
+    "crates/omnilink-gui",
 ]
 resolver = "2"
 

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "omnilink-gui",
+  "version": "0.1.0",
+  "identifier": "org.omnilink.gui",
+  "build": {
+    "frontendDist": "./dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Omnilink",
+        "label": "main",
+        "width": 1050,
+        "height": 700,
+        "center": true,
+        "theme": "Dark",
+        "windowClassname": "omnilink-gui"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

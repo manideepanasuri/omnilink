@@ -1,0 +1,22 @@
+[package]
+name = "omnilink-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Omnilink Tauri v2 desktop application for Wayland/Hyprland"
+
+[build-dependencies]
+tauri-build = { version = "2.0", default-features = false }
+
+[dependencies]
+tauri = { version = "2.0", default-features = false, features = ["wry"] }
+omnilink-protocol = { workspace = true }
+omnilink-daemon = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

@@ -4,3 +4,6 @@
 *~
 .DS_Store
 .agents/
+node_modules/
+**/dist/
+gen/
