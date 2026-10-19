@@ -31,4 +31,5 @@ blake3 = { workspace = true }
 wayland-client = { workspace = true }
 wayland-protocols = { workspace = true }
 wayland-protocols-wlr = { workspace = true }
+zbus = { workspace = true }
 

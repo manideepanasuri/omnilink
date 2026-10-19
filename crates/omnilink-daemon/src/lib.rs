@@ -6,6 +6,7 @@
 pub mod ble;
 pub mod clipboard;
 pub mod identity;
+pub mod notifications;
 pub mod pairing;
 pub mod quic;
 pub mod state;
@@ -32,6 +33,10 @@ pub use quic::{
     read_control_packet, run_stream_0, run_stream_1, write_clipboard_packet, write_control_packet,
     Ed25519ClientCertVerifier, Ed25519ServerCertVerifier, QuicError, QuicListener, QuicServer,
     ALPN_OMNILINK, HEARTBEAT_TIMEOUT, MAX_CLIPBOARD_FRAME_LEN,
+};
+pub use notifications::{
+    format_notification_actions, FreedesktopNotificationsProxy, NotificationError,
+    NotificationForwarder, NotificationMap,
 };
 pub use state::{ActiveSession, DaemonState, PairedDevice, SessionState};
 
