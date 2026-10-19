@@ -60,14 +60,19 @@ class OmnilinkConnectionManager(
     private var connectionJob: Job? = null
     private var currentSession: Stream0Session? = null
     private var stream1Session: Stream1Session? = null
+    private var stream2Session: Stream2Session? = null
     private var activeSocket: Socket? = null
     private var stream1Socket: Socket? = null
+    private var stream2Socket: Socket? = null
 
     val currentStream0Session: Stream0Session?
         get() = currentSession
 
     val currentStream1Session: Stream1Session?
         get() = stream1Session
+
+    val currentStream2Session: Stream2Session?
+        get() = stream2Session
 
     @Volatile
     private var shouldBeConnected = false
@@ -168,6 +173,9 @@ class OmnilinkConnectionManager(
                     // Automatically initialize and pump Stream 1 clipboard sync
                     initStream1Session(host, port)
 
+                    // Automatically initialize and pump Stream 2 notification sync
+                    initStream2Session(host, port)
+
                     // Suspend non-blockingly until session is terminated or coroutine is cancelled
                     sessionEnded.await()
                 } catch (e: CancellationException) {
@@ -221,7 +229,45 @@ class OmnilinkConnectionManager(
         }
     }
 
+    fun attachStream2Session(session: Stream2Session) {
+        stream2Session?.close()
+        stream2Session = session
+        session.start()
+    }
+
+    private fun initStream2Session(host: String, port: Int) {
+        try {
+            val s2 = Socket()
+            s2.tcpNoDelay = true
+            s2.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+            stream2Socket = s2
+            val session = Stream2Session(
+                inputStream = s2.getInputStream(),
+                outputStream = s2.getOutputStream(),
+                connectionManager = this,
+                scope = scope,
+                onDisconnect = { cause ->
+                    Log.i(TAG, "Stream 2 session ended: ${cause?.message}")
+                }
+            )
+            attachStream2Session(session)
+            Log.i(TAG, "Stream 2 notification session initialized and pumping")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to connect Stream 2 socket to $host:$port: ${e.message}")
+        }
+    }
+
     private fun closeCurrentSession() {
+        try {
+            stream2Session?.close()
+        } catch (_: Exception) {}
+        stream2Session = null
+
+        try {
+            stream2Socket?.close()
+        } catch (_: Exception) {}
+        stream2Socket = null
+
         try {
             stream1Session?.close()
         } catch (_: Exception) {}

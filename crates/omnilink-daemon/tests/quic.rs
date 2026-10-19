@@ -8,10 +8,14 @@ use ed25519_dalek::SigningKey;
 use omnilink_daemon::clipboard::ClipboardEvent;
 use omnilink_daemon::quic::{
     init_crypto_provider, make_client_config, read_clipboard_packet, read_control_packet,
-    write_clipboard_packet, write_control_packet, Ed25519ServerCertVerifier, QuicServer,
+    read_notification_packet, write_clipboard_packet, write_control_packet,
+    write_notification_packet, Ed25519ServerCertVerifier, QuicServer,
 };
 use omnilink_daemon::state::{DaemonState, PairedDevice};
-use omnilink_protocol::packet::{ClipboardPacket, ControlPacket};
+use omnilink_protocol::packet::{
+    ClipboardPacket, ControlPacket, NotificationAction, NotificationDismissPacket,
+    NotificationPacket, NotificationReplyPacket, NotificationStreamPacket,
+};
 use quinn::Endpoint;
 
 /// Helper to set up a test daemon listening on an ephemeral port with a paired client key.
@@ -751,4 +755,322 @@ async fn test_quic_12_stream_1_oversized_payload_clamp_rejected() {
     connection.close(0u32.into(), b"done");
     server_handle.abort();
 }
+
+#[tokio::test]
+async fn test_quic_13_stream_2_inbound_notification_dispatch() {
+    let (server, daemon_state, daemon_signing_key, client_signing_key) = setup_test_daemon().await;
+    let server_addr = server.local_addr().unwrap();
+    let server_handle = server.start();
+
+    let connection = connect_client(server_addr, &client_signing_key, &daemon_signing_key)
+        .await
+        .expect("Client should connect");
+
+    // Open Stream 0 (index 0)
+    let (mut send_stream_0, _recv_stream_0) = connection.open_bi().await.unwrap();
+    write_control_packet(&mut send_stream_0, &ControlPacket::Ping { timestamp: 500 })
+        .await
+        .unwrap();
+
+    // Open Stream 1 (index 1)
+    let (mut send_stream_1, _recv_stream_1) = connection.open_bi().await.unwrap();
+    let init_clip = ClipboardPacket {
+        sequence_id: 1,
+        mime_type: "text/plain".into(),
+        is_sensitive: false,
+        payload: b"ready".to_vec(),
+    };
+    write_clipboard_packet(&mut send_stream_1, &init_clip).await.unwrap();
+
+    // Open Stream 2 (index 2)
+    let (mut send_stream_2, _recv_stream_2) = connection.open_bi().await.unwrap();
+    assert_eq!(send_stream_2.id().index(), 2);
+
+    let mut notif_rx = daemon_state.inbound_notification_tx.subscribe();
+
+    // Client sends an inbound posted notification
+    let notif = NotificationPacket {
+        id: "msg-123".to_string(),
+        package_name: "org.telegram.messenger".to_string(),
+        app_name: "Telegram".to_string(),
+        title: "Alice".to_string(),
+        text: "See you at 5pm!".to_string(),
+        icon_png: None,
+        timestamp: 1729260000000,
+        can_reply: true,
+        actions: vec![NotificationAction {
+            key: "reply".to_string(),
+            title: "Reply".to_string(),
+            is_input: true,
+        }],
+    };
+
+    let stream_packet = NotificationStreamPacket::Posted(notif.clone());
+    write_notification_packet(&mut send_stream_2, &stream_packet)
+        .await
+        .expect("Client should write notification packet to Stream 2");
+
+    // Daemon receives and broadcasts on inbound_notification_tx
+    let received = tokio::time::timeout(Duration::from_secs(3), notif_rx.recv())
+        .await
+        .expect("Timed out waiting for notification broadcast")
+        .expect("Broadcast channel receive failed");
+
+    assert_eq!(received.id, "msg-123");
+    assert_eq!(received.title, "Alice");
+    assert_eq!(received.text, "See you at 5pm!");
+    assert!(received.can_reply);
+
+    // Client sends a dismissal
+    let mut dismiss_rx = daemon_state.inbound_dismiss_tx.subscribe();
+    let dismiss_packet = NotificationStreamPacket::Dismiss(NotificationDismissPacket {
+        id: "msg-123".to_string(),
+    });
+    write_notification_packet(&mut send_stream_2, &dismiss_packet)
+        .await
+        .expect("Client should write dismiss packet to Stream 2");
+
+    let received_dismiss = tokio::time::timeout(Duration::from_secs(3), dismiss_rx.recv())
+        .await
+        .expect("Timed out waiting for dismissal broadcast")
+        .expect("Broadcast channel receive failed");
+
+    assert_eq!(received_dismiss.id, "msg-123");
+
+    connection.close(0u32.into(), b"done");
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_14_stream_2_outbound_reply_and_dismiss_dispatch() {
+    let (server, daemon_state, daemon_signing_key, client_signing_key) = setup_test_daemon().await;
+    let server_addr = server.local_addr().unwrap();
+    let server_handle = server.start();
+
+    let connection = connect_client(server_addr, &client_signing_key, &daemon_signing_key)
+        .await
+        .expect("Client should connect");
+
+    // Open Stream 0
+    let (mut send_stream_0, _recv_stream_0) = connection.open_bi().await.unwrap();
+    write_control_packet(&mut send_stream_0, &ControlPacket::Ping { timestamp: 600 })
+        .await
+        .unwrap();
+
+    // Open Stream 1
+    let (mut send_stream_1, _recv_stream_1) = connection.open_bi().await.unwrap();
+    let init_clip = ClipboardPacket {
+        sequence_id: 1,
+        mime_type: "text/plain".into(),
+        is_sensitive: false,
+        payload: b"ready".to_vec(),
+    };
+    write_clipboard_packet(&mut send_stream_1, &init_clip).await.unwrap();
+
+    // Open Stream 2
+    let (mut send_stream_2, mut recv_stream_2) = connection.open_bi().await.unwrap();
+
+    // Send a dummy trigger packet to ensure daemon starts Stream 2 pump
+    let init_notif = NotificationStreamPacket::Posted(NotificationPacket {
+        id: "init".to_string(),
+        package_name: "pkg".to_string(),
+        app_name: "App".to_string(),
+        title: "T".to_string(),
+        text: "B".to_string(),
+        icon_png: None,
+        timestamp: 10,
+        can_reply: false,
+        actions: vec![],
+    });
+    write_notification_packet(&mut send_stream_2, &init_notif).await.unwrap();
+
+    // Wait until daemon session is active
+    for _ in 0..50 {
+        if daemon_state.is_connected().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(daemon_state.is_connected().await);
+
+    // Daemon dispatches outbound reply
+    let reply_packet = NotificationReplyPacket {
+        notification_id: "msg-123".to_string(),
+        action_key: "inline-reply".to_string(),
+        reply_text: "Replying back from Hyprland!".to_string(),
+    };
+
+    let session = daemon_state.session.read().await.clone().unwrap();
+    session
+        .send_notification(NotificationStreamPacket::Reply(reply_packet.clone()))
+        .await
+        .expect("Daemon should send reply over Stream 2");
+
+    // Client reads reply on Stream 2
+    let received_packet = read_notification_packet(&mut recv_stream_2)
+        .await
+        .expect("Client should read framed notification packet");
+
+    assert_eq!(
+        received_packet,
+        NotificationStreamPacket::Reply(reply_packet)
+    );
+
+    // Daemon dispatches outbound dismissal
+    let dismiss_packet = NotificationDismissPacket {
+        id: "msg-123".to_string(),
+    };
+    session
+        .send_notification(NotificationStreamPacket::Dismiss(dismiss_packet.clone()))
+        .await
+        .expect("Daemon should send dismiss over Stream 2");
+
+    let received_dismiss = read_notification_packet(&mut recv_stream_2)
+        .await
+        .expect("Client should read dismiss packet");
+
+    assert_eq!(
+        received_dismiss,
+        NotificationStreamPacket::Dismiss(dismiss_packet)
+    );
+
+    connection.close(0u32.into(), b"done");
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_15_stream_2_oversized_payload_clamp_rejected() {
+    let (server, _daemon_state, daemon_signing_key, client_signing_key) = setup_test_daemon().await;
+    let server_addr = server.local_addr().unwrap();
+    let server_handle = server.start();
+
+    let connection = connect_client(server_addr, &client_signing_key, &daemon_signing_key)
+        .await
+        .expect("Client should connect");
+
+    // Open Stream 0
+    let (mut send_stream_0, _recv_stream_0) = connection.open_bi().await.unwrap();
+    write_control_packet(&mut send_stream_0, &ControlPacket::Ping { timestamp: 700 })
+        .await
+        .unwrap();
+
+    // Open Stream 1
+    let (mut send_stream_1, _recv_stream_1) = connection.open_bi().await.unwrap();
+    let init_clip = ClipboardPacket {
+        sequence_id: 1,
+        mime_type: "text/plain".into(),
+        is_sensitive: false,
+        payload: b"ready".to_vec(),
+    };
+    write_clipboard_packet(&mut send_stream_1, &init_clip).await.unwrap();
+
+    // Open Stream 2
+    let (mut send_stream_2, _recv_stream_2) = connection.open_bi().await.unwrap();
+
+    // Send length prefix > 20 MiB clamp
+    let excessive_len: u32 = 25 * 1024 * 1024;
+    send_stream_2.write_all(&excessive_len.to_be_bytes()).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let dummy_packet = NotificationStreamPacket::Dismiss(NotificationDismissPacket {
+        id: "bad".to_string(),
+    });
+    let _ = write_notification_packet(&mut send_stream_2, &dummy_packet).await;
+
+    connection.close(0u32.into(), b"done");
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn test_quic_16_daemon_state_convenience_reply_and_dismissal_methods() {
+    let (server, daemon_state, daemon_signing_key, client_signing_key) = setup_test_daemon().await;
+    let server_addr = server.local_addr().unwrap();
+    let server_handle = server.start();
+
+    let connection = connect_client(server_addr, &client_signing_key, &daemon_signing_key)
+        .await
+        .expect("Client should connect");
+
+    // Open Stream 0
+    let (mut send_stream_0, _recv_stream_0) = connection.open_bi().await.unwrap();
+    write_control_packet(&mut send_stream_0, &ControlPacket::Ping { timestamp: 800 })
+        .await
+        .unwrap();
+
+    // Open Stream 1
+    let (mut send_stream_1, _recv_stream_1) = connection.open_bi().await.unwrap();
+    let init_clip = ClipboardPacket {
+        sequence_id: 1,
+        mime_type: "text/plain".into(),
+        is_sensitive: false,
+        payload: b"ready".to_vec(),
+    };
+    write_clipboard_packet(&mut send_stream_1, &init_clip).await.unwrap();
+
+    // Open Stream 2
+    let (mut send_stream_2, mut recv_stream_2) = connection.open_bi().await.unwrap();
+    let init_notif = NotificationStreamPacket::Posted(NotificationPacket {
+        id: "init-stream-2".to_string(),
+        package_name: "org.test".to_string(),
+        app_name: "Test".to_string(),
+        title: "Hello".to_string(),
+        text: "World".to_string(),
+        icon_png: None,
+        timestamp: 10,
+        can_reply: true,
+        actions: vec![],
+    });
+    write_notification_packet(&mut send_stream_2, &init_notif).await.unwrap();
+
+    // Wait until daemon session is active
+    for _ in 0..50 {
+        if daemon_state.is_connected().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(daemon_state.is_connected().await);
+
+    // 1. Daemon state sends inline reply
+    daemon_state
+        .send_notification_reply("msg-789", "inline-reply", "Direct state reply!")
+        .await
+        .expect("send_notification_reply should succeed");
+
+    let received_reply = read_notification_packet(&mut recv_stream_2)
+        .await
+        .expect("Client should receive reply packet");
+
+    assert_eq!(
+        received_reply,
+        NotificationStreamPacket::Reply(NotificationReplyPacket {
+            notification_id: "msg-789".to_string(),
+            action_key: "inline-reply".to_string(),
+            reply_text: "Direct state reply!".to_string(),
+        })
+    );
+
+    // 2. Daemon state sends dismissal
+    daemon_state
+        .send_notification_dismiss("msg-789")
+        .await
+        .expect("send_notification_dismiss should succeed");
+
+    let received_dismiss = read_notification_packet(&mut recv_stream_2)
+        .await
+        .expect("Client should receive dismiss packet");
+
+    assert_eq!(
+        received_dismiss,
+        NotificationStreamPacket::Dismiss(NotificationDismissPacket {
+            id: "msg-789".to_string(),
+        })
+    );
+
+    connection.close(0u32.into(), b"done");
+    server_handle.abort();
+}
+
+
 

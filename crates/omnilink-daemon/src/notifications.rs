@@ -39,6 +39,9 @@ pub trait FreedesktopNotifications {
 
     #[zbus(signal)]
     fn notification_closed(&self, id: u32, reason: u32) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn notification_replied(&self, id: u32, text: &str) -> zbus::Result<()>;
 }
 
 /// Bidirectional map between mobile notification keys and desktop notification IDs.
@@ -230,6 +233,85 @@ impl NotificationForwarder {
             }
         }
     }
+
+    pub async fn receive_action_invoked(&self) -> zbus::Result<ActionInvokedStream> {
+        self.proxy.receive_action_invoked().await
+    }
+
+    pub async fn receive_notification_closed(&self) -> zbus::Result<NotificationClosedStream> {
+        self.proxy.receive_notification_closed().await
+    }
+
+    pub async fn receive_notification_replied(&self) -> zbus::Result<NotificationRepliedStream> {
+        self.proxy.receive_notification_replied().await
+    }
+}
+
+/// Spawns a background task listening for D-Bus notification dismissal and action/reply signals.
+///
+/// Handles:
+/// - `NotificationClosed`: If reason is 2 (User dismissed), sends `Dismiss` to companion.
+/// - `ActionInvoked`: If action is invoked, sends `Reply` with action_key to companion.
+/// - `NotificationReplied`: If user replied with text, sends `Reply` with action_key "inline-reply" and text to companion.
+pub async fn start_dbus_signal_listener(
+    forwarder: NotificationForwarder,
+    state: Arc<crate::state::DaemonState>,
+) -> Result<tokio::task::JoinHandle<()>, NotificationError> {
+    let mut closed_stream = forwarder.receive_notification_closed().await?;
+    let mut action_stream = forwarder.receive_action_invoked().await?;
+    let mut reply_stream = forwarder.receive_notification_replied().await?;
+
+    let handle = tokio::spawn(async move {
+        use futures::StreamExt;
+        loop {
+            tokio::select! {
+                Some(closed) = closed_stream.next() => {
+                    if let Ok(args) = closed.args() {
+                        let desktop_id = args.id;
+                        let reason = args.reason;
+                        // Reason 2 = Dismissed by user
+                        if reason == 2 {
+                            if let Some(remote_key) = forwarder.remove_by_desktop_id(desktop_id) {
+                                tracing::info!(desktop_id, remote_key = %remote_key, "Desktop notification dismissed by user, notifying companion");
+                                if let Err(e) = state.send_notification_dismiss(remote_key).await {
+                                    tracing::debug!(error = %e, "Could not forward desktop dismissal (companion disconnected)");
+                                }
+                            }
+                        } else {
+                            forwarder.remove_by_desktop_id(desktop_id);
+                        }
+                    }
+                }
+                Some(action) = action_stream.next() => {
+                    if let Ok(args) = action.args() {
+                        let desktop_id = args.id;
+                        let action_key = args.action_key;
+                        if let Some(remote_key) = forwarder.get_remote_key(desktop_id) {
+                            tracing::info!(desktop_id, remote_key = %remote_key, action_key = %action_key, "Desktop notification action invoked, notifying companion");
+                            if let Err(e) = state.send_notification_reply(remote_key, action_key, "").await {
+                                tracing::debug!(error = %e, "Could not forward action invocation (companion disconnected)");
+                            }
+                        }
+                    }
+                }
+                Some(reply) = reply_stream.next() => {
+                    if let Ok(args) = reply.args() {
+                        let desktop_id = args.id;
+                        let reply_text = args.text;
+                        if let Some(remote_key) = forwarder.get_remote_key(desktop_id) {
+                            tracing::info!(desktop_id, remote_key = %remote_key, "Desktop notification replied, notifying companion");
+                            if let Err(e) = state.send_notification_reply(remote_key, "inline-reply", reply_text).await {
+                                tracing::debug!(error = %e, "Could not forward inline reply (companion disconnected)");
+                            }
+                        }
+                    }
+                }
+                else => break,
+            }
+        }
+    });
+
+    Ok(handle)
 }
 
 #[cfg(test)]

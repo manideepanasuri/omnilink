@@ -11,8 +11,9 @@ pub mod types;
 pub use error::{ProtocolError, Result};
 pub use packet::{
     decode_clipboard_binary, encode_clipboard_binary, from_json, from_msgpack, to_json, to_msgpack,
-    ClipboardPacket, CommandAction, ControlPacket, NotificationAction, NotificationPacket,
-    NotificationReplyPacket, Packet,
+    ClipboardPacket, CommandAction, ControlPacket, NotificationAction,
+    NotificationDismissPacket, NotificationPacket, NotificationReplyPacket,
+    NotificationStreamPacket, Packet,
 };
 pub use pairing::{is_valid_base64, parse_address, PairingPayload};
 pub use types::DeviceStatus;

@@ -81,3 +81,73 @@ data class NotificationReplyPacket(
         }
     }
 }
+
+/**
+ * Bidirectional dismissal synchronization packet for Stream 2.
+ * Matches `omnilink_protocol::packet::NotificationDismissPacket`.
+ */
+@Serializable
+data class NotificationDismissPacket(
+    @SerialName("id") val id: String
+) {
+    fun toJson(): String = Companion.toJson(this)
+
+    companion object {
+        val json = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+            encodeDefaults = true
+            explicitNulls = true
+        }
+
+        fun fromJson(jsonStr: String): NotificationDismissPacket {
+            return json.decodeFromString(serializer(), jsonStr)
+        }
+
+        fun toJson(packet: NotificationDismissPacket): String {
+            return json.encodeToString(serializer(), packet)
+        }
+    }
+}
+
+/**
+ * Multiplexed packet types transmitted over QUIC Stream 2.
+ * Binary format: `[type_id: 1 byte][payload: N bytes UTF-8 JSON]`
+ */
+sealed class NotificationStreamPacket {
+    data class Posted(val packet: NotificationPacket) : NotificationStreamPacket()
+    data class Reply(val packet: NotificationReplyPacket) : NotificationStreamPacket()
+    data class Dismiss(val packet: NotificationDismissPacket) : NotificationStreamPacket()
+
+    fun encodeBinary(): ByteArray {
+        val (typeId, jsonStr) = when (this) {
+            is Posted -> TYPE_POSTED to packet.toJson()
+            is Reply -> TYPE_REPLY to packet.toJson()
+            is Dismiss -> TYPE_DISMISS to packet.toJson()
+        }
+        val jsonBytes = jsonStr.toByteArray(Charsets.UTF_8)
+        val buf = java.nio.ByteBuffer.allocate(1 + jsonBytes.size)
+        buf.put(typeId)
+        buf.put(jsonBytes)
+        return buf.array()
+    }
+
+    companion object {
+        const val TYPE_POSTED: Byte = 1
+        const val TYPE_REPLY: Byte = 2
+        const val TYPE_DISMISS: Byte = 3
+
+        fun decodeBinary(bytes: ByteArray): NotificationStreamPacket {
+            require(bytes.isNotEmpty()) { "Empty payload for NotificationStreamPacket" }
+            val typeId = bytes[0]
+            val jsonStr = String(bytes, 1, bytes.size - 1, Charsets.UTF_8)
+            return when (typeId) {
+                TYPE_POSTED -> Posted(NotificationPacket.fromJson(jsonStr))
+                TYPE_REPLY -> Reply(NotificationReplyPacket.fromJson(jsonStr))
+                TYPE_DISMISS -> Dismiss(NotificationDismissPacket.fromJson(jsonStr))
+                else -> throw IllegalArgumentException("Unknown Stream 2 packet type ID: $typeId")
+            }
+        }
+    }
+}
+

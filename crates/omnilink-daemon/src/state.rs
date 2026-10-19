@@ -1,13 +1,17 @@
 //! Daemon and active connection session state.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use omnilink_protocol::packet::{ClipboardPacket, ControlPacket};
+use omnilink_protocol::packet::{
+    ClipboardPacket, ControlPacket, NotificationDismissPacket, NotificationPacket,
+    NotificationReplyPacket, NotificationStreamPacket,
+};
 use omnilink_protocol::types::DeviceStatus;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
 use crate::clipboard::{ClipboardEvent, ClipboardFilter};
+use crate::notifications::NotificationForwarder;
 
 /// Information about a paired companion device.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +37,8 @@ pub struct ActiveSession {
     pub command_tx: tokio::sync::mpsc::Sender<ControlPacket>,
     /// Outbound clipboard dispatch channel for Stream 1.
     pub clipboard_tx: tokio::sync::mpsc::Sender<ClipboardEvent>,
+    /// Outbound notification dispatch channel for Stream 2.
+    pub notification_tx: tokio::sync::mpsc::Sender<NotificationStreamPacket>,
     /// Device battery charge percentage (0..100).
     pub battery_pct: u8,
     /// Whether the device is connected to power/charging.
@@ -54,6 +60,7 @@ impl ActiveSession {
         connection: quinn::Connection,
         command_tx: tokio::sync::mpsc::Sender<ControlPacket>,
         clipboard_tx: tokio::sync::mpsc::Sender<ClipboardEvent>,
+        notification_tx: tokio::sync::mpsc::Sender<NotificationStreamPacket>,
     ) -> Self {
         let connection_id = connection.stable_id();
         Self {
@@ -62,6 +69,7 @@ impl ActiveSession {
             connection_id,
             command_tx,
             clipboard_tx,
+            notification_tx,
             battery_pct: 0,
             is_charging: false,
             wifi_ssid: None,
@@ -100,6 +108,14 @@ impl ActiveSession {
         event: ClipboardEvent,
     ) -> Result<(), tokio::sync::mpsc::error::SendError<ClipboardEvent>> {
         self.clipboard_tx.send(event).await
+    }
+
+    /// Sends an outbound notification stream packet to the companion over Stream 2.
+    pub async fn send_notification(
+        &self,
+        packet: NotificationStreamPacket,
+    ) -> Result<(), Box<tokio::sync::mpsc::error::SendError<NotificationStreamPacket>>> {
+        self.notification_tx.send(packet).await.map_err(Box::new)
     }
 
     /// Updates session telemetry fields from a received `DeviceStatus`.
@@ -145,6 +161,14 @@ pub struct DaemonState {
     pub last_received_clipboard: RwLock<Option<ClipboardPacket>>,
     /// Inbound clipboard notification broadcast channel.
     pub inbound_clipboard_tx: tokio::sync::broadcast::Sender<ClipboardPacket>,
+    /// Desktop D-Bus notification forwarder, if connected to session bus.
+    pub notification_forwarder: Arc<tokio::sync::RwLock<Option<NotificationForwarder>>>,
+    /// Inbound mobile notifications broadcast channel.
+    pub inbound_notification_tx: tokio::sync::broadcast::Sender<NotificationPacket>,
+    /// Inbound notification reply broadcast channel.
+    pub inbound_reply_tx: tokio::sync::broadcast::Sender<NotificationReplyPacket>,
+    /// Inbound notification dismissal broadcast channel.
+    pub inbound_dismiss_tx: tokio::sync::broadcast::Sender<NotificationDismissPacket>,
 }
 
 /// Type alias for `DaemonState` to support `SessionState` naming convention.
@@ -155,6 +179,9 @@ impl DaemonState {
     pub fn new(identity: SigningKey, paired_device: Option<PairedDevice>) -> Self {
         let initial_key = paired_device.as_ref().map(|d| d.public_key);
         let (inbound_clipboard_tx, _) = tokio::sync::broadcast::channel(32);
+        let (inbound_notification_tx, _) = tokio::sync::broadcast::channel(32);
+        let (inbound_reply_tx, _) = tokio::sync::broadcast::channel(32);
+        let (inbound_dismiss_tx, _) = tokio::sync::broadcast::channel(32);
         Self {
             identity,
             paired_device: RwLock::new(paired_device),
@@ -163,6 +190,10 @@ impl DaemonState {
             clipboard_filter: Arc::new(std::sync::Mutex::new(ClipboardFilter::new())),
             last_received_clipboard: RwLock::new(None),
             inbound_clipboard_tx,
+            notification_forwarder: Arc::new(tokio::sync::RwLock::new(None)),
+            inbound_notification_tx,
+            inbound_reply_tx,
+            inbound_dismiss_tx,
         }
     }
 
@@ -174,6 +205,9 @@ impl DaemonState {
     ) -> Self {
         let initial_key = paired_device.as_ref().map(|d| d.public_key);
         let (inbound_clipboard_tx, _) = tokio::sync::broadcast::channel(32);
+        let (inbound_notification_tx, _) = tokio::sync::broadcast::channel(32);
+        let (inbound_reply_tx, _) = tokio::sync::broadcast::channel(32);
+        let (inbound_dismiss_tx, _) = tokio::sync::broadcast::channel(32);
         Self {
             identity,
             paired_device: RwLock::new(paired_device),
@@ -182,7 +216,31 @@ impl DaemonState {
             clipboard_filter,
             last_received_clipboard: RwLock::new(None),
             inbound_clipboard_tx,
+            notification_forwarder: Arc::new(tokio::sync::RwLock::new(None)),
+            inbound_notification_tx,
+            inbound_reply_tx,
+            inbound_dismiss_tx,
         }
+    }
+
+    /// Sets the desktop notification forwarder.
+    pub async fn set_notification_forwarder(&self, forwarder: NotificationForwarder) {
+        *self.notification_forwarder.write().await = Some(forwarder);
+    }
+
+    /// Broadcasts an inbound notification packet from mobile.
+    pub async fn notify_inbound_notification(&self, packet: NotificationPacket) {
+        let _ = self.inbound_notification_tx.send(packet);
+    }
+
+    /// Broadcasts an inbound notification reply packet.
+    pub async fn notify_inbound_reply(&self, packet: NotificationReplyPacket) {
+        let _ = self.inbound_reply_tx.send(packet);
+    }
+
+    /// Broadcasts an inbound notification dismissal packet.
+    pub async fn notify_inbound_dismiss(&self, packet: NotificationDismissPacket) {
+        let _ = self.inbound_dismiss_tx.send(packet);
     }
 
     /// Loads the daemon identity from default keystore (or generates a new one)
@@ -283,6 +341,45 @@ impl DaemonState {
     /// Subscribes to inbound clipboard packets received from the remote companion.
     pub fn subscribe_inbound_clipboard(&self) -> tokio::sync::broadcast::Receiver<ClipboardPacket> {
         self.inbound_clipboard_tx.subscribe()
+    }
+
+    /// Dispatches an outbound notification stream packet to the companion over Stream 2, if connected.
+    pub async fn send_notification(
+        &self,
+        packet: NotificationStreamPacket,
+    ) -> Result<(), Box<tokio::sync::mpsc::error::SendError<NotificationStreamPacket>>> {
+        let session_lock = self.session.read().await;
+        if let Some(ref session) = *session_lock {
+            session.send_notification(packet).await
+        } else {
+            Err(Box::new(tokio::sync::mpsc::error::SendError(packet)))
+        }
+    }
+
+    /// Sends a quick reply to a remote mobile notification over Stream 2.
+    pub async fn send_notification_reply(
+        &self,
+        notification_id: impl Into<String>,
+        action_key: impl Into<String>,
+        reply_text: impl Into<String>,
+    ) -> Result<(), Box<tokio::sync::mpsc::error::SendError<NotificationStreamPacket>>> {
+        self.send_notification(NotificationStreamPacket::Reply(NotificationReplyPacket {
+            notification_id: notification_id.into(),
+            action_key: action_key.into(),
+            reply_text: reply_text.into(),
+        }))
+        .await
+    }
+
+    /// Sends a dismissal for a remote mobile notification over Stream 2.
+    pub async fn send_notification_dismiss(
+        &self,
+        notification_id: impl Into<String>,
+    ) -> Result<(), Box<tokio::sync::mpsc::error::SendError<NotificationStreamPacket>>> {
+        self.send_notification(NotificationStreamPacket::Dismiss(NotificationDismissPacket {
+            id: notification_id.into(),
+        }))
+        .await
     }
 
     /// Drops the active session only if the provided stable_id matches the current active connection.

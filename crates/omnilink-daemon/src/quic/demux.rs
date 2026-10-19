@@ -6,6 +6,7 @@ use quinn::Connection;
 
 use crate::quic::stream0::run_stream_0;
 use crate::quic::stream1::run_stream_1;
+use crate::quic::stream2::run_stream_2;
 use crate::quic::QuicError;
 use crate::state::{ActiveSession, DaemonState};
 
@@ -29,6 +30,11 @@ pub async fn handle_connection(
         (tx, Some(rx))
     };
 
+    let (notification_tx, mut notification_rx_opt) = {
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        (tx, Some(rx))
+    };
+
     // Initialize active session telemetry
     {
         let session = ActiveSession::new(
@@ -36,6 +42,7 @@ pub async fn handle_connection(
             connection.clone(),
             command_tx,
             clipboard_tx,
+            notification_tx,
         );
         *state.session.write().await = Some(session);
     }
@@ -81,8 +88,17 @@ pub async fn handle_connection(
                                     }
                                 }
                                 2 => {
-                                    // Stream 2 (Bi): Notifications & Action Replies (Extension point)
-                                    tracing::info!("Accepted Stream 2 (Notifications) - ready for pump");
+                                    // Stream 2 (Bi): Notifications & Action Replies
+                                    let s_clone = state.clone();
+                                    if let Some(notification_rx) = notification_rx_opt.take() {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = run_stream_2(send_stream, recv_stream, s_clone, notification_rx).await {
+                                                tracing::debug!(error = %e, "Stream 2 finished");
+                                            }
+                                        });
+                                    } else {
+                                        tracing::warn!("Stream 2 already established for this connection, rejecting duplicate");
+                                    }
                                 }
                                 3 => {
                                     // Stream 3 (Bi): High-Throughput File & Photo Sync (Extension point)

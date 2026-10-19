@@ -327,6 +327,110 @@ impl NotificationReplyPacket {
     }
 }
 
+/// Bidirectional dismissal synchronization packet for Stream 2.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationDismissPacket {
+    /// Target notification unique key.
+    pub id: String,
+}
+
+impl NotificationDismissPacket {
+    /// Serialize this `NotificationDismissPacket` to MessagePack bytes.
+    pub fn to_msgpack(&self) -> Result<Vec<u8>> {
+        to_msgpack(self)
+    }
+
+    /// Deserialize a `NotificationDismissPacket` from MessagePack bytes.
+    pub fn from_msgpack(bytes: &[u8]) -> Result<Self> {
+        from_msgpack(bytes)
+    }
+
+    /// Serialize this `NotificationDismissPacket` to a JSON string.
+    pub fn to_json(&self) -> Result<String> {
+        to_json(self)
+    }
+
+    /// Deserialize a `NotificationDismissPacket` from a JSON string.
+    pub fn from_json(json_str: &str) -> Result<Self> {
+        from_json(json_str)
+    }
+}
+
+/// Multiplexed packet types transmitted over QUIC Stream 2.
+///
+/// Binary frame payload format: `[type_id: 1 byte][payload: N bytes UTF-8 JSON]`
+/// - `0x01`: Posted notification (`NotificationPacket`)
+/// - `0x02`: Quick reply (`NotificationReplyPacket`)
+/// - `0x03`: Dismissal (`NotificationDismissPacket`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotificationStreamPacket {
+    /// Mobile notification event posted to desktop.
+    Posted(NotificationPacket),
+    /// Desktop quick reply event forwarded to Android RemoteInput.
+    Reply(NotificationReplyPacket),
+    /// Dismissal event (desktop closed or Android swipe-dismissed).
+    Dismiss(NotificationDismissPacket),
+}
+
+impl NotificationStreamPacket {
+    pub const TYPE_POSTED: u8 = 1;
+    pub const TYPE_REPLY: u8 = 2;
+    pub const TYPE_DISMISS: u8 = 3;
+
+    /// Encodes this stream packet into wire format: `[type_id: 1B][json_bytes: NB]`.
+    pub fn encode_binary(&self) -> Result<Vec<u8>> {
+        let mut buf = Vec::new();
+        match self {
+            Self::Posted(packet) => {
+                buf.push(Self::TYPE_POSTED);
+                buf.extend_from_slice(packet.to_json()?.as_bytes());
+            }
+            Self::Reply(packet) => {
+                buf.push(Self::TYPE_REPLY);
+                buf.extend_from_slice(packet.to_json()?.as_bytes());
+            }
+            Self::Dismiss(packet) => {
+                buf.push(Self::TYPE_DISMISS);
+                buf.extend_from_slice(packet.to_json()?.as_bytes());
+            }
+        }
+        Ok(buf)
+    }
+
+    /// Decodes a stream packet from wire format: `[type_id: 1B][json_bytes: NB]`.
+    pub fn decode_binary(bytes: &[u8]) -> Result<Self> {
+        if bytes.is_empty() {
+            return Err(ProtocolError::InvalidHeader(
+                "Empty payload for NotificationStreamPacket".to_string(),
+            ));
+        }
+
+        let type_id = bytes[0];
+        let json_slice = std::str::from_utf8(&bytes[1..])?;
+
+        match type_id {
+            Self::TYPE_POSTED => {
+                let packet: NotificationPacket = serde_json::from_str(json_slice)
+                    .map_err(|e| ProtocolError::Deserialization(e.to_string()))?;
+                Ok(Self::Posted(packet))
+            }
+            Self::TYPE_REPLY => {
+                let packet: NotificationReplyPacket = serde_json::from_str(json_slice)
+                    .map_err(|e| ProtocolError::Deserialization(e.to_string()))?;
+                Ok(Self::Reply(packet))
+            }
+            Self::TYPE_DISMISS => {
+                let packet: NotificationDismissPacket = serde_json::from_str(json_slice)
+                    .map_err(|e| ProtocolError::Deserialization(e.to_string()))?;
+                Ok(Self::Dismiss(packet))
+            }
+            other => Err(ProtocolError::InvalidHeader(format!(
+                "Unknown Stream 2 packet type ID: {other}"
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,6 +737,65 @@ mod tests {
         let parsed_json = NotificationReplyPacket::from_json(&json_str)
             .expect("Failed to deserialize NotificationReplyPacket from JSON");
         assert_eq!(reply, parsed_json);
+    }
+
+    #[test]
+    fn test_notification_dismiss_packet_msgpack_and_json() {
+        let dismiss = NotificationDismissPacket {
+            id: "0|org.telegram.messenger|12345".to_string(),
+        };
+
+        let msgpack = dismiss.to_msgpack().expect("to_msgpack");
+        let parsed_msgpack = NotificationDismissPacket::from_msgpack(&msgpack).expect("from_msgpack");
+        assert_eq!(dismiss, parsed_msgpack);
+
+        let json = dismiss.to_json().expect("to_json");
+        let parsed_json = NotificationDismissPacket::from_json(&json).expect("from_json");
+        assert_eq!(dismiss, parsed_json);
+    }
+
+    #[test]
+    fn test_notification_stream_packet_binary_roundtrip() {
+        let posted = NotificationStreamPacket::Posted(NotificationPacket {
+            id: "notif-1".to_string(),
+            package_name: "org.example".to_string(),
+            app_name: "Example".to_string(),
+            title: "Hello".to_string(),
+            text: "World".to_string(),
+            icon_png: None,
+            timestamp: 1000,
+            can_reply: true,
+            actions: vec![],
+        });
+
+        let encoded_posted = posted.encode_binary().expect("encode posted");
+        let decoded_posted = NotificationStreamPacket::decode_binary(&encoded_posted).expect("decode posted");
+        assert_eq!(posted, decoded_posted);
+
+        let reply = NotificationStreamPacket::Reply(NotificationReplyPacket {
+            notification_id: "notif-1".to_string(),
+            action_key: "inline-reply".to_string(),
+            reply_text: "Replying back!".to_string(),
+        });
+
+        let encoded_reply = reply.encode_binary().expect("encode reply");
+        let decoded_reply = NotificationStreamPacket::decode_binary(&encoded_reply).expect("decode reply");
+        assert_eq!(reply, decoded_reply);
+
+        let dismiss = NotificationStreamPacket::Dismiss(NotificationDismissPacket {
+            id: "notif-1".to_string(),
+        });
+
+        let encoded_dismiss = dismiss.encode_binary().expect("encode dismiss");
+        let decoded_dismiss = NotificationStreamPacket::decode_binary(&encoded_dismiss).expect("decode dismiss");
+        assert_eq!(dismiss, decoded_dismiss);
+
+        // Unknown type error handling
+        let bad_type = vec![0x99, b'{', b'}'];
+        assert!(NotificationStreamPacket::decode_binary(&bad_type).is_err());
+
+        // Empty error handling
+        assert!(NotificationStreamPacket::decode_binary(&[]).is_err());
     }
 
     #[test]
